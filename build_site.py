@@ -1,9 +1,7 @@
 """
-Generates site/index.html with the embedded weather graph and summary tables.
-Run this in the directory that contains the GPX files.
+Generates site/index.html with an interactive Plotly weather chart.
 """
 
-import base64
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -11,17 +9,6 @@ from zoneinfo import ZoneInfo
 import weather_graph
 
 VIENNA = ZoneInfo("Europe/Vienna")
-
-WMO_CODES = {
-    0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
-    45: "Fog", 48: "Icy fog",
-    51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
-    61: "Light rain", 63: "Rain", 65: "Heavy rain",
-    71: "Light snow", 73: "Snow", 75: "Heavy snow",
-    80: "Light showers", 81: "Showers", 82: "Heavy showers",
-    85: "Light snow showers", 86: "Heavy snow showers",
-    95: "Thunderstorm", 96: "Thunderstorm+hail",
-}
 
 HTML = """\
 <!DOCTYPE html>
@@ -32,71 +19,105 @@ HTML = """\
   <title>Ötztal Trek — Live Weather</title>
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
     body {{
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      background: #f2f2f2;
+      background: #f0f0f0;
       color: #1a1a1a;
-      padding: 1.5rem;
+      min-height: 100dvh;
     }}
-    .wrap {{ max-width: 1080px; margin: 0 auto; }}
-    header {{ margin-bottom: 1.25rem; }}
-    h1 {{ font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; }}
-    .sub {{ color: #555; margin-top: 0.2rem; font-size: 0.95rem; }}
-    .updated {{ color: #999; font-size: 0.8rem; margin-top: 0.4rem; }}
+
+    .page {{ max-width: 1100px; margin: 0 auto; padding: 1.25rem 1rem 2rem; }}
+
+    /* Header */
+    header {{ margin-bottom: 1.1rem; }}
+    h1 {{ font-size: clamp(1.25rem, 4vw, 1.7rem); font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; }}
+    .sub {{ color: #555; margin-top: 0.2rem; font-size: 0.92rem; }}
+    .updated {{ color: #aaa; font-size: 0.78rem; margin-top: 0.35rem; }}
+
+    /* Cards */
     .card {{
       background: #fff;
-      border-radius: 10px;
-      box-shadow: 0 1px 3px rgba(0,0,0,.08);
+      border-radius: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.07);
       padding: 1rem;
       margin-bottom: 1rem;
     }}
-    .graph img {{ width: 100%; height: auto; display: block; border-radius: 4px; }}
-    .extremes {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }}
-    .extreme-label {{
-      font-size: 0.7rem; text-transform: uppercase; letter-spacing: .08em;
-      color: #888; margin-bottom: .25rem;
+
+    /* Chart — fixed-width Plotly div inside a horizontal scroll container */
+    .chart-card {{ padding: 0.5rem 0 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+    .chart-card::-webkit-scrollbar {{ height: 6px; }}
+    .chart-card::-webkit-scrollbar-track {{ background: #f0f0f0; border-radius: 3px; }}
+    .chart-card::-webkit-scrollbar-thumb {{ background: #ccc; border-radius: 3px; }}
+
+    /* Extremes grid */
+    .extremes {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1rem;
     }}
-    .temp-big {{ font-size: 2.8rem; font-weight: 700; line-height: 1; }}
-    .hot {{ color: #e84b3a; }}
+    @media (max-width: 480px) {{
+      .extremes {{ grid-template-columns: 1fr; gap: 0.75rem; }}
+    }}
+    .extreme-label {{
+      font-size: 0.68rem; text-transform: uppercase;
+      letter-spacing: .08em; color: #999; margin-bottom: .2rem;
+    }}
+    .temp-big {{ font-size: clamp(2rem, 8vw, 2.8rem); font-weight: 700; line-height: 1; }}
+    .hot  {{ color: #e84b3a; }}
     .cold {{ color: #2255aa; }}
-    .detail {{ color: #666; font-size: 0.82rem; margin-top: .35rem; }}
-    h2 {{ font-size: 0.85rem; text-transform: uppercase; letter-spacing: .07em; color: #666; margin-bottom: .75rem; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 0.88rem; }}
+    .detail {{ color: #777; font-size: 0.8rem; margin-top: .35rem; }}
+
+    /* Tables */
+    h2 {{
+      font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: .08em; color: #888; margin-bottom: .7rem;
+    }}
+    .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 0.86rem; white-space: nowrap; }}
     thead th {{
-      text-align: left; padding: .4rem .75rem;
-      background: #f7f7f7; font-size: 0.75rem;
-      text-transform: uppercase; letter-spacing: .06em; color: #888;
+      text-align: left; padding: .35rem .7rem;
+      background: #f8f8f8;
+      font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: .06em; color: #999;
       border-bottom: 1px solid #eee;
     }}
-    tbody td {{ padding: .5rem .75rem; border-bottom: 1px solid #f0f0f0; }}
+    tbody td {{ padding: .5rem .7rem; border-bottom: 1px solid #f2f2f2; }}
     tbody tr:last-child td {{ border-bottom: none; }}
+    tbody tr:hover td {{ background: #fafafa; }}
+
+    /* Temperature badges */
     .badge {{
-      display: inline-block; padding: .15rem .45rem; border-radius: 4px;
-      font-size: 0.75rem; font-weight: 600;
+      display: inline-block; padding: .2rem .5rem;
+      border-radius: 5px; font-size: 0.8rem; font-weight: 600;
     }}
-    .badge-hot {{ background: #fce8e6; color: #c0392b; }}
+    .badge-hot  {{ background: #fce8e6; color: #c0392b; }}
     .badge-cold {{ background: #e8edf8; color: #1a4488; }}
-    .badge-mid {{ background: #f0f0f0; color: #555; }}
-    footer {{ margin-top: 1.5rem; color: #bbb; font-size: 0.75rem; text-align: center; }}
-    @media (max-width: 600px) {{
-      .extremes {{ grid-template-columns: 1fr; }}
-      .temp-big {{ font-size: 2.2rem; }}
+    .badge-mid  {{ background: #f0f0f0; color: #555;    }}
+
+    footer {{
+      margin-top: 1.5rem; color: #ccc;
+      font-size: 0.72rem; text-align: center; line-height: 1.8;
     }}
+    footer a {{ color: #bbb; text-decoration: none; }}
+    footer a:hover {{ text-decoration: underline; }}
   </style>
 </head>
 <body>
-<div class="wrap">
+<div class="page">
+
   <header>
     <h1>Ötztal Trek — Live Weather</h1>
     <p class="sub">Current conditions along the 4-stage route through the Austrian Alps</p>
-    <p class="updated">Updated {updated} &nbsp;·&nbsp; {total_km:.1f} km total route</p>
+    <p class="updated">Updated {updated} &nbsp;·&nbsp; {total_km:.1f} km total</p>
   </header>
 
-  <div class="card graph">
-    <img src="data:image/png;base64,{img_b64}" alt="Temperature and elevation profile along the Ötztal Trek">
+  <div class="card chart-card">
+    {chart_html}
   </div>
 
-  <div class="extremes" style="margin-bottom:1rem">
+  <div class="extremes">
     <div class="card">
       <div class="extreme-label">Hottest point now</div>
       <div class="temp-big hot">{hottest_temp:.1f}°C</div>
@@ -109,27 +130,32 @@ HTML = """\
     </div>
   </div>
 
-  <div class="card">
+  <div class="card" style="margin-bottom:1rem">
     <h2>Stage high points</h2>
-    <table>
-      <thead><tr><th>Stage</th><th>Elevation</th><th>Temperature</th></tr></thead>
-      <tbody>{peaks_rows}</tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Stage</th><th>Elevation</th><th>Temperature</th></tr></thead>
+        <tbody>{peaks_rows}</tbody>
+      </table>
+    </div>
   </div>
 
-  <div class="card" style="margin-top:1rem">
+  <div class="card">
     <h2>Overnight stays</h2>
-    <table>
-      <thead><tr><th>Location</th><th>Stage</th><th>Elevation</th><th>Temperature</th></tr></thead>
-      <tbody>{overnights_rows}</tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Location</th><th>Stage</th><th>Elevation</th><th>Temperature</th></tr></thead>
+        <tbody>{overnights_rows}</tbody>
+      </table>
+    </div>
   </div>
 
   <footer>
-    Data: <a href="https://open-meteo.com/" style="color:#bbb">Open-Meteo</a> &nbsp;·&nbsp;
-    Routes: Ötztal Trek Highlights (RideWithGPS) &nbsp;·&nbsp;
+    Weather: <a href="https://open-meteo.com/">Open-Meteo</a> &nbsp;·&nbsp;
+    Routes: Ötztal Trek Highlights via RideWithGPS &nbsp;·&nbsp;
     Refreshed hourly 08:00–20:00 CEST
   </footer>
+
 </div>
 </body>
 </html>
@@ -138,30 +164,27 @@ HTML = """\
 
 def temp_badge(t):
     if t >= 20:
-        return f'<span class="badge badge-hot">{t:.1f}°C</span>'
+        cls = "badge-hot"
     elif t <= 13:
-        return f'<span class="badge badge-cold">{t:.1f}°C</span>'
+        cls = "badge-cold"
     else:
-        return f'<span class="badge badge-mid">{t:.1f}°C</span>'
+        cls = "badge-mid"
+    return f'<span class="badge {cls}">{t:.1f}°C</span>'
 
 
 def main():
     os.makedirs("site", exist_ok=True)
 
-    print("Generating weather graph...")
+    print("Generating weather data and chart...")
     data = weather_graph.main()
-
-    with open("otztal_weather.png", "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode()
 
     now = datetime.now(VIENNA)
     updated = now.strftime("%A %d %B %Y, %H:%M CEST")
 
-    # Stage name lookup by km range
     def stage_name_for_km(km):
         for s in data["stages"]:
             if s["start_km"] <= km <= s["end_km"] + 0.5:
-                return s["name"].replace("\n", " – ")
+                return s["name"]
         return "—"
 
     # Peaks table
@@ -169,12 +192,10 @@ def main():
     for lat, lon, ele, km, label, temp in data["peaks"]:
         stage = stage_name_for_km(km)
         peak_rows.append(
-            f"<tr><td>{stage}</td>"
-            f"<td>{ele:.0f} m</td>"
-            f"<td>{temp_badge(temp)}</td></tr>"
+            f"<tr><td>{stage}</td><td>{ele:.0f} m</td><td>{temp_badge(temp)}</td></tr>"
         )
 
-    # Overnights table — deduplicate consecutive same-location entries
+    # Overnights table — deduplicate by rounded km
     seen_km = set()
     overnight_rows = []
     for lat, lon, ele, km, label, temp in data["overnights"]:
@@ -184,16 +205,14 @@ def main():
         seen_km.add(key)
         stage = stage_name_for_km(km)
         overnight_rows.append(
-            f"<tr><td>{label}</td>"
-            f"<td>{stage}</td>"
-            f"<td>{ele:.0f} m</td>"
-            f"<td>{temp_badge(temp)}</td></tr>"
+            f"<tr><td>{label}</td><td>{stage}</td>"
+            f"<td>{ele:.0f} m</td><td>{temp_badge(temp)}</td></tr>"
         )
 
     html = HTML.format(
         updated=updated,
         total_km=data["total_km"],
-        img_b64=img_b64,
+        chart_html=data["chart_html"],
         hottest_temp=data["hottest"]["temp"],
         hottest_ele=data["hottest"]["ele"],
         hottest_km=data["hottest"]["km"],
@@ -207,7 +226,8 @@ def main():
     out = "site/index.html"
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"Saved: {out}")
+    size_kb = os.path.getsize(out) / 1024
+    print(f"Saved: {out}  ({size_kb:.0f} KB)")
 
 
 if __name__ == "__main__":

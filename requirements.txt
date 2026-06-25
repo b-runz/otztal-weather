@@ -1,4 +1,4 @@
 gpxpy
 requests
-matplotlib
+plotly
 tzdata
