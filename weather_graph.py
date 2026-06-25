@@ -332,6 +332,7 @@ def main():
             range=[0, max(plot_ele) * 1.5],
         ),
         hovermode="x unified",
+        dragmode=False,
         legend=dict(
             orientation="h", yanchor="bottom", y=1.06,
             xanchor="left", x=0,
@@ -350,9 +351,9 @@ def main():
         full_html=False,
         config={
             "responsive": True,
-            "displayModeBar": "hover",
-            "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"],
+            "displayModeBar": False,
             "scrollZoom": False,
+            "staticPlot": False,
         },
         div_id="weather-chart",
     )
