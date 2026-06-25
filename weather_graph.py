@@ -194,9 +194,10 @@ def main():
 
     def stage_for_km(km):
         for sd in stage_data:
-            if sd["start_km"] <= km <= sd["end_km"] + 0.5:
+            if sd["start_km"] <= km <= sd["end_km"]:
                 return sd["name"]
-        return ""
+        # Fallback: nearest stage end (handles points exactly at a boundary)
+        return min(stage_data, key=lambda s: abs(s["end_km"] - km))["name"]
 
     # Thin track for plotting (~600 pts is smooth enough)
     plot_pts = all_pts[::max(1, len(all_pts) // 600)]
