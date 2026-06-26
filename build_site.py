@@ -118,6 +118,8 @@ HTML = """\
     <p class="updated">Updated {updated} &nbsp;·&nbsp; {total_km:.1f} km total</p>
     <p style="margin-top:.6rem">
       <a href="forecast.html" style="display:inline-block;padding:.35rem .8rem;background:#2255aa;color:#fff;border-radius:7px;font-size:.85rem;font-weight:600;text-decoration:none;letter-spacing:.01em">Jul 6–9 Forecast →</a>
+      &nbsp;
+      <a href="history.html" style="display:inline-block;padding:.35rem .8rem;background:#555;color:#fff;border-radius:7px;font-size:.85rem;font-weight:600;text-decoration:none;letter-spacing:.01em">10-Day History →</a>
     </p>
   </header>
 
@@ -225,7 +227,6 @@ def _get_hourly_window_batch(waypoints, stages):
                 window[iso] = round(v, 1)
         results.append(window)
     return results
-
 
 _FORECAST_HEAD = """\
 <!DOCTYPE html>
@@ -699,6 +700,7 @@ def main():
 
     print("\nGenerating forecast page...")
     build_forecast_site()
+
 
 
 if __name__ == "__main__":
