@@ -9,7 +9,44 @@ import json
 import math
 import os
 
-import weather_graph as wg
+import gpxpy
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
+    return R * 2 * math.asin(math.sqrt(a))
+
+
+def parse_gpx(filepath):
+    with open(filepath, encoding="utf-8") as f:
+        gpx = gpxpy.parse(f)
+    pts = []
+    for track in gpx.tracks:
+        for seg in track.segments:
+            for pt in seg.points:
+                pts.append((pt.latitude, pt.longitude, pt.elevation or 0))
+    return pts
+
+
+def add_distances(pts, offset_km=0.0):
+    result = []
+    cum = offset_km
+    for i, (lat, lon, ele) in enumerate(pts):
+        if i > 0:
+            cum += haversine_km(pts[i-1][0], pts[i-1][1], lat, lon)
+        result.append((lat, lon, ele, cum))
+    return result
+
+
+def sample_indices(n, count):
+    if count >= n:
+        return list(range(n))
+    step = n / count
+    return [int(i * step) for i in range(count)]
 
 # Dates for each stage (index 0 = stage 1)
 STAGE_DATES = ["2026-07-06", "2026-07-07", "2026-07-08", "2026-07-09"]
@@ -77,8 +114,8 @@ def main():
 
     offset = 0.0
     for stage_index, filepath in enumerate(gpx_files):
-        raw = wg.parse_gpx(filepath)
-        pts = wg.add_distances(raw, offset_km=offset)
+        raw = parse_gpx(filepath)
+        pts = add_distances(raw, offset_km=offset)
         offset = pts[-1][3]
 
         base = os.path.basename(filepath).replace(".gpx", "")
@@ -137,7 +174,7 @@ def main():
     for sd in stage_data:
         timed = add_hiking_times(sd["pts"])
         si    = sd["stage_index"]
-        for idx in wg.sample_indices(len(timed), SAMPLES_PER_STAGE):
+        for idx in sample_indices(len(timed), SAMPLES_PER_STAGE):
             lat, lon, ele, cum_km, tobler_h = timed[idx]
             sample_waypoints.append({
                 "lat": lat, "lon": lon, "ele": ele,
@@ -147,7 +184,7 @@ def main():
 
     def already_sampled(lat, lon, threshold_km=0.5):
         return any(
-            wg.haversine_km(lat, lon, w["lat"], w["lon"]) < threshold_km
+            haversine_km(lat, lon, w["lat"], w["lon"]) < threshold_km
             for w in sample_waypoints
         )
 

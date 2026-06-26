@@ -17,7 +17,7 @@ import weather_graph
 def _get_with_retry(url, params, retries=4):
     for attempt in range(retries):
         try:
-            r = requests.get(url, params=params, timeout=30)
+            r = requests.get(url, params=params, timeout=60)
             r.raise_for_status()
             return r
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
@@ -612,6 +612,7 @@ def build_forecast_site():
 
     print(f"Fetching forecast weather for {len(waypoints)} waypoints...")
     temps_list = [None] * len(waypoints)
+    time.sleep(2)
     for i in range(0, len(waypoints), FORECAST_BATCH):
         batch = waypoints[i : i + FORECAST_BATCH]
         try:

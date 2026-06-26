@@ -1,4 +1,3 @@
-gpxpy
 requests
 plotly
 tzdata
