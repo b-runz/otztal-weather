@@ -13,6 +13,29 @@ from zoneinfo import ZoneInfo
 import requests
 import weather_graph
 
+
+def _get_with_retry(url, params, retries=4):
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=30)
+            r.raise_for_status()
+            return r
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            if attempt == retries - 1:
+                raise
+            wait = 2 ** (attempt + 1)
+            print(f"  request error ({exc}), retrying in {wait}s...")
+            time.sleep(wait)
+        except requests.exceptions.HTTPError:
+            if r.status_code == 429:
+                wait = 2 ** (attempt + 1)
+                print(f"  rate limited (429), retrying in {wait}s...")
+                time.sleep(wait)
+                if attempt == retries - 1:
+                    raise
+            else:
+                raise
+
 VIENNA = ZoneInfo("Europe/Vienna")
 
 HTML = """\
@@ -199,16 +222,14 @@ def _get_hourly_window_batch(waypoints, stages):
     """
     lats = ",".join(f"{w['lat']:.5f}" for w in waypoints)
     lons = ",".join(f"{w['lon']:.5f}" for w in waypoints)
-    r = requests.get(
+    r = _get_with_retry(
         "https://api.open-meteo.com/v1/forecast",
         params={
             "latitude": lats, "longitude": lons,
             "hourly": "temperature_2m", "timezone": "Europe/Vienna",
             "start_date": FORECAST_START_DATE, "end_date": FORECAST_END_DATE,
         },
-        timeout=15,
     )
-    r.raise_for_status()
     data = r.json()
     if not isinstance(data, list):
         data = [data]
@@ -602,7 +623,7 @@ def build_forecast_site():
             print(f"  batch failed: {e}")
             for j in range(len(batch)):
                 temps_list[i + j] = {}
-        time.sleep(0.4)
+        time.sleep(1.0)
 
     waypoints_out = [{**w, "temps": t or {}} for w, t in zip(waypoints, temps_list)]
     route_out = {

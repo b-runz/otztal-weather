@@ -11,6 +11,29 @@ import time
 
 import requests
 import gpxpy
+
+
+def _get_with_retry(url, params, retries=4):
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=30)
+            r.raise_for_status()
+            return r
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            if attempt == retries - 1:
+                raise
+            wait = 2 ** (attempt + 1)
+            print(f"  request error ({exc}), retrying in {wait}s...")
+            time.sleep(wait)
+        except requests.exceptions.HTTPError:
+            if r.status_code == 429:
+                wait = 2 ** (attempt + 1)
+                print(f"  rate limited (429), retrying in {wait}s...")
+                time.sleep(wait)
+                if attempt == retries - 1:
+                    raise
+            else:
+                raise
 import plotly.graph_objects as go
 
 
@@ -71,8 +94,7 @@ def get_weather_batch(points):
         "timezone": "Europe/Vienna",
         "forecast_days": 1,
     }
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
+    r = _get_with_retry(url, params)
     data = r.json()
     if isinstance(data, list):
         return [d["current"]["temperature_2m"] for d in data]
@@ -170,7 +192,7 @@ def main():
             print(f"  batch {i//BATCH + 1}/{math.ceil(len(sample_pts)/BATCH)} done")
         except Exception as e:
             print(f"  batch failed: {e}")
-        time.sleep(0.4)
+        time.sleep(1.0)
 
     sorted_kms = sorted(temps_by_km.keys())
     sorted_temps = [temps_by_km[k] for k in sorted_kms]
