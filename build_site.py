@@ -218,7 +218,8 @@ FORECAST_BATCH = 10
 
 def _get_hourly_window_batch(waypoints, stages):
     """Fetch hourly forecast for a batch of waypoints.
-    Returns one {ISO_hour: temp} dict per waypoint, covering only the arrival window.
+    Returns one dict per waypoint with keys 'temps', 'precip', 'precip_prob',
+    each a {ISO_hour: value} mapping covering only the arrival window.
     """
     lats = ",".join(f"{w['lat']:.5f}" for w in waypoints)
     lons = ",".join(f"{w['lon']:.5f}" for w in waypoints)
@@ -226,7 +227,8 @@ def _get_hourly_window_batch(waypoints, stages):
         "https://api.open-meteo.com/v1/forecast",
         params={
             "latitude": lats, "longitude": lons,
-            "hourly": "temperature_2m", "timezone": "Europe/Vienna",
+            "hourly": "temperature_2m,precipitation,precipitation_probability",
+            "timezone": "Europe/Vienna",
             "start_date": FORECAST_START_DATE, "end_date": FORECAST_END_DATE,
         },
     )
@@ -236,17 +238,27 @@ def _get_hourly_window_batch(waypoints, stages):
 
     results = []
     for w, d in zip(waypoints, data):
-        by_time = dict(zip(d["hourly"]["time"], d["hourly"]["temperature_2m"]))
+        by_temp  = dict(zip(d["hourly"]["time"], d["hourly"]["temperature_2m"]))
+        by_prec  = dict(zip(d["hourly"]["time"], d["hourly"]["precipitation"]))
+        by_prob  = dict(zip(d["hourly"]["time"], d["hourly"]["precipitation_probability"]))
         stage_date = stages[w["stage_index"]]["date"]
         early = int(WINDOW_EARLY_H + w["tobler_h"])
         late  = math.ceil(WINDOW_LATE_H + w["tobler_h"])
-        window = {}
+        temps = {}
+        precip = {}
+        precip_prob = {}
         for h in range(early, late + 1):
             iso = f"{stage_date}T{h:02d}:00"
-            v = by_time.get(iso)
+            v = by_temp.get(iso)
             if v is not None:
-                window[iso] = round(v, 1)
-        results.append(window)
+                temps[iso] = round(v, 1)
+            v = by_prec.get(iso)
+            if v is not None:
+                precip[iso] = round(v, 2)
+            v = by_prob.get(iso)
+            if v is not None:
+                precip_prob[iso] = v
+        results.append({"temps": temps, "precip": precip, "precip_prob": precip_prob})
     return results
 
 _FORECAST_HEAD = """\
@@ -291,8 +303,8 @@ _FORECAST_HEAD = """\
     .badge-hot  { background: #fce8e6; color: #c0392b; }
     .badge-cold { background: #e8edf8; color: #1a4488; }
     .badge-mid  { background: #f0f0f0; color: #555; }
-    .extremes { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
-    @media (max-width: 480px) { .extremes { grid-template-columns: 1fr; gap: .75rem; } }
+    .extremes { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+    @media (max-width: 600px) { .extremes { grid-template-columns: 1fr; gap: .75rem; } }
     .extreme-label { font-size: .68rem; text-transform: uppercase; letter-spacing: .08em; color: #999; margin-bottom: .2rem; }
     .temp-big { font-size: clamp(2rem, 8vw, 2.8rem); font-weight: 700; line-height: 1; }
     .hot  { color: #e84b3a; }
@@ -339,6 +351,11 @@ _FORECAST_HEAD = """\
       <div class="temp-big cold" id="coldest-temp">—</div>
       <div class="detail" id="coldest-detail"></div>
     </div>
+    <div class="card">
+      <div class="extreme-label">Highest rain probability</div>
+      <div class="temp-big" style="color:#2255aa" id="max-precip-prob">—</div>
+      <div class="detail" id="max-precip-detail"></div>
+    </div>
   </div>
 
   <div class="card" style="margin-bottom:1rem">
@@ -361,6 +378,10 @@ _FORECAST_HEAD = """\
     </div>
   </div>
 
+  <div class="card chart-card">
+    <div id="precip-chart"></div>
+  </div>
+
   <footer>
     Weather: <a href="https://open-meteo.com/">Open-Meteo</a> &nbsp;·&nbsp;
     Routes: Ötztal Trek Highlights via RideWithGPS &nbsp;·&nbsp;
@@ -378,10 +399,9 @@ const WAYPOINTS = __WAYPOINTS_JSON__;
 
 _FORECAST_JS = r"""
 (function () {
-  const todayStr = new Date().toLocaleDateString('sv'); // YYYY-MM-DD in local time
+  const todayStr = new Date().toLocaleDateString('sv');
   const stages = ROUTE.stages;
 
-  // Populate stage dropdown, default to today's stage
   const stageSel = document.getElementById('start-stage');
   stages.forEach((s, i) => {
     const opt = document.createElement('option');
@@ -401,9 +421,6 @@ _FORECAST_JS = r"""
     activeWaypoints  = WAYPOINTS.filter(w => w.stage_index === first);
     activeProfile    = ROUTE.route_profile.filter(p => p.stage_index === first);
     activePeaks      = ROUTE.peaks.filter(p => p.stage_index === first);
-    // Include overnights within this stage's km range.
-    // The starting overnight lives under the previous stage_index, so override
-    // it to use tobler_h=0 and the current stage so temperature looks up the right date.
     activeOvernights = ROUTE.overnights
       .filter(p => p.cum_km >= stage.start_km - 0.5 && p.cum_km <= stage.end_km + 0.5)
       .map(p => p.stage_index < first
@@ -416,20 +433,24 @@ _FORECAST_JS = r"""
     return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
   }
 
-  function getTemp(w, startH) {
-    const arrH = startH + w.tobler_h;
-    const roundedH = Math.round(arrH);
+  function getField(w, field, startH) {
+    const src = w[field];
+    if (!src) return null;
+    const roundedH = Math.round(startH + w.tobler_h);
     const iso = stages[w.stage_index].date + 'T' + String(roundedH).padStart(2, '0') + ':00';
-    if (w.temps[iso] !== undefined) return w.temps[iso];
+    if (src[iso] !== undefined) return src[iso];
     let best = null, bestDiff = Infinity;
-    for (const [k, v] of Object.entries(w.temps)) {
+    for (const [k, v] of Object.entries(src)) {
       const diff = Math.abs(parseInt(k.slice(11, 13), 10) - roundedH);
       if (diff < bestDiff) { bestDiff = diff; best = v; }
     }
     return best;
   }
 
-  // For peaks/overnights: find nearest waypoint in same stage, use its temps dict
+  const getTemp       = (w, h) => getField(w, 'temps',       h);
+  const getPrecipMM   = (w, h) => getField(w, 'precip',      h);
+  const getPrecipProb = (w, h) => getField(w, 'precip_prob', h);
+
   function getTempForKP(pt, startH) {
     const stageWps = WAYPOINTS.filter(w => w.stage_index === pt.stage_index);
     if (!stageWps.length) return null;
@@ -439,7 +460,7 @@ _FORECAST_JS = r"""
     return getTemp({...nearest, tobler_h: pt.tobler_h}, startH);
   }
 
-  function interpTemp(km, wpSorted, byKm) {
+  function interp(km, wpSorted, byKm) {
     if (!wpSorted.length) return null;
     if (km <= wpSorted[0].cum_km) return byKm[wpSorted[0].cum_km];
     const last = wpSorted[wpSorted.length - 1];
@@ -466,7 +487,8 @@ _FORECAST_JS = r"""
     return activeStages[activeStages.length - 1]?.name ?? '';
   }
 
-  let initialized = false;
+  let tempInitialized = false;
+  let precipInitialized = false;
 
   function redraw() {
     refreshActive();
@@ -475,6 +497,7 @@ _FORECAST_JS = r"""
     const [hh, mm] = val.split(':').map(Number);
     const startH = hh + mm / 60;
 
+    // ── Temperature ──
     const byKm = {};
     for (const w of activeWaypoints) {
       const t = getTemp(w, startH);
@@ -484,10 +507,10 @@ _FORECAST_JS = r"""
 
     const xArr    = activeProfile.map(p => p.cum_km);
     const eleArr  = activeProfile.map(p => p.ele);
-    const tmpArr  = activeProfile.map(p => interpTemp(p.cum_km, wpSorted, byKm));
+    const tmpArr  = activeProfile.map(p => interp(p.cum_km, wpSorted, byKm));
     const custArr = activeProfile.map(p => [Math.round(p.ele), stageForKm(p.cum_km)]);
 
-    const traces = [
+    const tempTraces = [
       {
         x: xArr, y: eleArr, type: 'scatter',
         fill: 'tozeroy', fillcolor: 'rgba(139,115,85,0.15)',
@@ -504,7 +527,7 @@ _FORECAST_JS = r"""
       }
     ];
 
-    if (activePeaks.length) traces.push({
+    if (activePeaks.length) tempTraces.push({
       x: activePeaks.map(p => p.cum_km),
       y: activePeaks.map(p => getTempForKP(p, startH)),
       mode: 'markers', type: 'scatter',
@@ -514,7 +537,7 @@ _FORECAST_JS = r"""
       hovertemplate: '<b>▲ %{customdata[0]}</b><br>🌡 %{y:.1f}°C<br>⛰ %{customdata[1]:.0f} m<br>~%{customdata[2]} on %{customdata[3]}<extra>Peak</extra>'
     });
 
-    if (activeOvernights.length) traces.push({
+    if (activeOvernights.length) tempTraces.push({
       x: activeOvernights.map(p => p.cum_km),
       y: activeOvernights.map(p => getTempForKP(p, startH)),
       mode: 'markers', type: 'scatter',
@@ -525,7 +548,18 @@ _FORECAST_JS = r"""
     });
 
     const maxEle = Math.max(...eleArr.filter(Number.isFinite));
-    const layout = {
+    const stageShapes = activeStages.slice(0, -1).map(s => ({
+      type: 'line', x0: s.end_km, x1: s.end_km, y0: 0, y1: 1, yref: 'paper',
+      line: {dash: 'dash', color: 'rgba(0,0,0,0.18)', width: 1}
+    }));
+    const stageAnnotations = activeStages.map(s => ({
+      x: (s.start_km + s.end_km) / 2, y: 1.0, xref: 'x', yref: 'paper',
+      text: s.name + ' · ' + s.date, showarrow: false,
+      font: {size: 9, color: '#888'}, align: 'center',
+      yanchor: 'bottom', bgcolor: 'rgba(255,255,255,0.7)'
+    }));
+
+    const tempLayout = {
       xaxis: {title: 'Distance along route (km)', showgrid: true, gridcolor: 'rgba(0,0,0,0.06)', zeroline: false},
       yaxis: {
         title: {text: 'Forecast temperature (°C)', font: {color: '#E84B3A'}},
@@ -540,30 +574,74 @@ _FORECAST_JS = r"""
       legend: {orientation: 'h', yanchor: 'bottom', y: 1.06, xanchor: 'left', x: 0, font: {size: 11}},
       plot_bgcolor: 'white', paper_bgcolor: 'white',
       margin: {l: 55, r: 65, t: 90, b: 50}, height: 440, width: 1000, autosize: false,
-      shapes: activeStages.slice(0, -1).map(s => ({
-        type: 'line', x0: s.end_km, x1: s.end_km, y0: 0, y1: 1, yref: 'paper',
-        line: {dash: 'dash', color: 'rgba(0,0,0,0.18)', width: 1}
-      })),
-      annotations: activeStages.map(s => ({
-        x: (s.start_km + s.end_km) / 2, y: 1.0, xref: 'x', yref: 'paper',
-        text: s.name + ' · ' + s.date, showarrow: false,
-        font: {size: 9, color: '#888'}, align: 'center',
-        yanchor: 'bottom', bgcolor: 'rgba(255,255,255,0.7)'
-      }))
+      shapes: stageShapes, annotations: stageAnnotations
     };
 
     const cfg = {responsive: true, displayModeBar: false, scrollZoom: false};
-    if (!initialized) { Plotly.newPlot('forecast-chart', traces, layout, cfg); initialized = true; }
-    else               { Plotly.react('forecast-chart', traces, layout, cfg); }
+    if (!tempInitialized) { Plotly.newPlot('forecast-chart', tempTraces, tempLayout, cfg); tempInitialized = true; }
+    else                   { Plotly.react('forecast-chart', tempTraces, tempLayout, cfg); }
 
-    // Peaks table
+    // ── Precipitation ──
+    const byKmProb = {}, byKmMM = {};
+    for (const w of activeWaypoints) {
+      const p = getPrecipProb(w, startH);  if (p != null) byKmProb[w.cum_km] = p;
+      const m = getPrecipMM(w, startH);    if (m != null) byKmMM[w.cum_km]   = m;
+    }
+    const wpSortedProb = activeWaypoints.filter(w => byKmProb[w.cum_km] != null);
+    const wpSortedMM   = activeWaypoints.filter(w => byKmMM[w.cum_km]   != null);
+
+    const probArr = activeProfile.map(p => interp(p.cum_km, wpSortedProb, byKmProb));
+    const mmArr   = activeProfile.map(p => interp(p.cum_km, wpSortedMM,   byKmMM));
+
+    const precipTraces = [
+      {
+        x: xArr, y: eleArr, type: 'scatter',
+        fill: 'tozeroy', fillcolor: 'rgba(139,115,85,0.15)',
+        line: {color: 'rgba(139,115,85,0.35)', width: 1},
+        name: 'Elevation', yaxis: 'y2',
+        hovertemplate: '⛰ %{y:.0f} m<extra>Elevation</extra>'
+      },
+      {
+        x: xArr, y: probArr, type: 'scatter',
+        line: {color: '#2255aa', width: 2.5},
+        fill: 'tozeroy', fillcolor: 'rgba(34,85,170,0.12)',
+        name: 'Precip probability',
+        customdata: mmArr.map((m, i) => [m ?? 0, custArr[i][0], custArr[i][1]]),
+        hovertemplate: '<b>%{x:.1f} km</b><br>🌧 %{y:.0f}% · %{customdata[0]:.1f} mm/h<br>⛰ %{customdata[1]} m<br><span style="color:#999">%{customdata[2]}</span><extra>Route</extra>'
+      }
+    ];
+
+    const precipLayout = {
+      xaxis: {title: 'Distance along route (km)', showgrid: true, gridcolor: 'rgba(0,0,0,0.06)', zeroline: false},
+      yaxis: {
+        title: {text: 'Precipitation probability (%)', font: {color: '#2255aa'}},
+        tickfont: {color: '#2255aa'}, showgrid: true, gridcolor: 'rgba(0,0,0,0.06)',
+        zeroline: false, range: [0, 100]
+      },
+      yaxis2: {
+        title: {text: 'Elevation (m)', font: {color: '#8B7355'}},
+        tickfont: {color: '#8B7355'}, overlaying: 'y', side: 'right',
+        showgrid: false, range: [0, maxEle * 1.5]
+      },
+      hovermode: 'x unified', dragmode: false,
+      legend: {orientation: 'h', yanchor: 'bottom', y: 1.06, xanchor: 'left', x: 0, font: {size: 11}},
+      plot_bgcolor: 'white', paper_bgcolor: 'white',
+      margin: {l: 55, r: 65, t: 55, b: 50}, height: 280, width: 1000, autosize: false,
+      shapes: stageShapes,
+      annotations: stageAnnotations.map(a => ({...a, xref: 'x', yref: 'paper'}))
+    };
+
+    if (!precipInitialized) { Plotly.newPlot('precip-chart', precipTraces, precipLayout, cfg); precipInitialized = true; }
+    else                     { Plotly.react('precip-chart', precipTraces, precipLayout, cfg); }
+
+    // ── Peaks table ──
     document.getElementById('peaks-body').innerHTML =
       activePeaks.map(p => {
         const s = stages[p.stage_index];
         return `<tr><td>${s.name}</td><td>${s.date}</td><td>~${fmtH(startH + p.tobler_h)}</td><td>${p.ele.toFixed(0)} m</td><td>${tempBadge(getTempForKP(p, startH))}</td></tr>`;
       }).join('') || '<tr><td colspan="5" style="color:#aaa">—</td></tr>';
 
-    // Overnights table
+    // ── Overnights table ──
     document.getElementById('overnights-body').innerHTML =
       activeOvernights.map(p => {
         const s = stages[p.stage_index];
@@ -571,10 +649,10 @@ _FORECAST_JS = r"""
         return `<tr><td>${p.name}</td><td>${stageLbl}</td><td>${s.date}</td><td>~${fmtH(startH + p.tobler_h)}</td><td>${p.ele.toFixed(0)} m</td><td>${tempBadge(getTempForKP(p, startH))}</td></tr>`;
       }).join('') || '<tr><td colspan="6" style="color:#aaa">—</td></tr>';
 
-    // Extremes
+    // ── Extremes ──
     const entries = wpSorted.map(w => ({km: w.cum_km, ele: w.ele, temp: byKm[w.cum_km]}));
     if (entries.length) {
-      const hot = entries.reduce((a, b) => a.temp > b.temp ? a : b);
+      const hot  = entries.reduce((a, b) => a.temp > b.temp ? a : b);
       const cold = entries.reduce((a, b) => a.temp < b.temp ? a : b);
       document.getElementById('hottest-temp').textContent = hot.temp.toFixed(1) + '°C';
       document.getElementById('hottest-detail').textContent =
@@ -582,6 +660,16 @@ _FORECAST_JS = r"""
       document.getElementById('coldest-temp').textContent = cold.temp.toFixed(1) + '°C';
       document.getElementById('coldest-detail').textContent =
         `${Math.round(cold.ele)} m elevation · ${cold.km.toFixed(1)} km into route`;
+    }
+
+    const precipEntries = activeWaypoints
+      .map(w => ({km: w.cum_km, ele: w.ele, prob: getPrecipProb(w, startH), mm: getPrecipMM(w, startH), arrH: startH + w.tobler_h}))
+      .filter(e => e.prob != null);
+    if (precipEntries.length) {
+      const wettest = precipEntries.reduce((a, b) => a.prob > b.prob ? a : b);
+      document.getElementById('max-precip-prob').textContent = Math.round(wettest.prob) + '%';
+      document.getElementById('max-precip-detail').textContent =
+        `~${fmtH(wettest.arrH)} · ${Math.round(wettest.ele)} m · ${wettest.mm != null ? wettest.mm.toFixed(1) + ' mm/h' : ''}`;
     }
   }
 
@@ -611,22 +699,33 @@ def build_forecast_site():
     waypoints = route["waypoints"]
 
     print(f"Fetching forecast weather for {len(waypoints)} waypoints...")
-    temps_list = [None] * len(waypoints)
+    weather_list = [None] * len(waypoints)
     time.sleep(2)
     for i in range(0, len(waypoints), FORECAST_BATCH):
         batch = waypoints[i : i + FORECAST_BATCH]
         try:
-            batch_temps = _get_hourly_window_batch(batch, stages)
-            for j, t in enumerate(batch_temps):
-                temps_list[i + j] = t
+            batch_weather = _get_hourly_window_batch(batch, stages)
+            for j, t in enumerate(batch_weather):
+                weather_list[i + j] = t
             print(f"  batch {i // FORECAST_BATCH + 1}/{math.ceil(len(waypoints) / FORECAST_BATCH)} done")
         except Exception as e:
             print(f"  batch failed: {e}")
             for j in range(len(batch)):
-                temps_list[i + j] = {}
+                weather_list[i + j] = {}
         time.sleep(1.0)
 
-    waypoints_out = [{**w, "temps": t or {}} for w, t in zip(waypoints, temps_list)]
+    def _w(entry, key):
+        if not entry:
+            return {}
+        return entry.get(key, {}) if isinstance(entry, dict) else entry
+
+    waypoints_out = [
+        {**w,
+         "temps":       _w(t, "temps"),
+         "precip":      _w(t, "precip"),
+         "precip_prob": _w(t, "precip_prob")}
+        for w, t in zip(waypoints, weather_list)
+    ]
     route_out = {
         "total_km":      route["total_km"],
         "stages":        stages,
